@@ -24,21 +24,21 @@ This repository provides code for training and evaluating neural distinguishers 
 ├── RKmcp.py                 # Inception-based model architecture with attention
 ├── eval_nets.py             # Evaluation and statistical analysis functions
 ├── cipher/                  # PRESENT-80 cipher implementation
-├── requirements.txt         # Python dependencies
-└── README.md                # This file
+├── requirements.txt         # zz
+└── README.md                 
 ```
 
 ---
 
 ## Requirements
 
-- Python 3.8+
-- TensorFlow 2.x
-- NumPy
+- Python zzz
+- TensorFlow zz
+- NumPy zz
 - CuPy (optional, for NVIDIA GPU acceleration)
-- scikit-learn
-- tqdm
-- scipy
+- scikit-learn zz
+- tqdm zz
+- scipy zz
 
 Install dependencies:
 ```sh

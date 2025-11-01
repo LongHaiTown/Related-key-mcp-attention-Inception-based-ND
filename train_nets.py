@@ -4,8 +4,8 @@ import numpy as np
 import cupy as cp
 import tensorflow as tf
 from tensorflow.keras.callbacks import (
-    ModelCheckpoint, LearningRateScheduler, LambdaCallback,
-    EarlyStopping, TerminateOnNaN, TensorBoard
+    ModelCheckpoint, LearningRateScheduler,
+    EarlyStopping, TerminateOnNaN, TensorBoard, CSVLogger
 )
 from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
@@ -19,16 +19,14 @@ def integer_to_binary_array(int_val, num_bits):
 def cyclic_lr(num_epochs, high_lr, low_lr):
     return lambda i: low_lr + ((num_epochs - 1) - i % num_epochs) / (num_epochs - 1) * (high_lr - low_lr)
 
-def print_lr(epoch, logs):
-    # Note: 'model' must be in global scope or passed in via closure if used in callbacks
-    lr = tf.keras.backend.get_value(tf.keras.backend.get_value(tf.keras.backend.learning_rate(tf.keras.backend.get_session())))
-    print(f"Epoch {epoch}: Learning Rate = {lr:.6f}")
-
-lr_logger = LambdaCallback(on_epoch_end=print_lr)
 lr_scheduler = LearningRateScheduler(cyclic_lr(num_epochs=10, high_lr=0.002, low_lr=0.0001))
 
+# Ensure checkpoints directory exists
+os.makedirs('checkpoints', exist_ok=True)
+
+# Use modern .keras format for best checkpoint
 checkpoint_cb = ModelCheckpoint(
-    filepath='best_model.h5',
+    filepath=os.path.join('checkpoints', 'best_model.keras'),
     monitor='val_loss',
     save_best_only=True,
     save_weights_only=False,
@@ -45,35 +43,90 @@ earlystop_cb = EarlyStopping(
 terminate_nan_cb = TerminateOnNaN()
 
 log_dir = os.path.join("logs", datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
-tensorboard_cb = TensorBoard(log_dir=log_dir, histogram_freq=1)
+tensorboard_cb = TensorBoard(log_dir=log_dir, histogram_freq=0)
+csv_logger_cb = CSVLogger(os.path.join(log_dir, "training.csv"))
 
 callbacks = [
     checkpoint_cb,
     lr_scheduler,
-    lr_logger,
     earlystop_cb,
     terminate_nan_cb,
-    tensorboard_cb
+    tensorboard_cb,
+    csv_logger_cb
 ]
 
-def update_checkpoint_in_callbacks(callbacks, rounds, save_dir='checkpoints'):
-    from tensorflow.keras.callbacks import ModelCheckpoint
+def update_checkpoint_in_callbacks(
+    callbacks,
+    rounds,
+    cipher_name: str = "present80",
+    run_id: str | None = None,
+    save_dir: str = 'checkpoints',
+    add_last_checkpoint: bool = True
+):
+    from tensorflow.keras.callbacks import ModelCheckpoint, TensorBoard, CSVLogger
 
-    os.makedirs(save_dir, exist_ok=True)
-    filename = f"{save_dir}/best_model_{rounds}rounds.h5"
-    new_ckpt = ModelCheckpoint(
-        filepath=filename,
+    # Prepare directories
+    ckpt_dir = os.path.join(save_dir, cipher_name)
+    os.makedirs(ckpt_dir, exist_ok=True)
+
+    # Best model per cipher and rounds
+    best_path = os.path.join(ckpt_dir, f"{cipher_name}_best_{rounds}r.keras")
+    new_best_ckpt = ModelCheckpoint(
+        filepath=best_path,
         monitor='val_loss',
         save_best_only=True,
         save_weights_only=False,
         verbose=1
     )
+
+    # Replace existing 'best' checkpoint if present; otherwise append
+    replaced = False
     for i, cb in enumerate(callbacks):
-        if isinstance(cb, ModelCheckpoint):
-            callbacks[i] = new_ckpt
+        if isinstance(cb, ModelCheckpoint) and getattr(cb, 'save_best_only', False):
+            callbacks[i] = new_best_ckpt
+            replaced = True
             break
-    else:
-        callbacks.append(new_ckpt)
+    if not replaced:
+        callbacks.append(new_best_ckpt)
+
+    # Optionally add a 'last' checkpoint (weights only) saved every epoch for resume
+    if add_last_checkpoint:
+        last_path = os.path.join(ckpt_dir, f"{cipher_name}_last_{rounds}r.weights.h5")
+        last_ckpt = ModelCheckpoint(
+            filepath=last_path,
+            save_best_only=False,
+            save_weights_only=True,
+            save_freq='epoch',
+            verbose=0
+        )
+        callbacks.append(last_ckpt)
+
+    # Configure per-run logs (TensorBoard + CSV)
+    if run_id is None:
+        run_id = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_root = os.path.join("logs", cipher_name, run_id)
+    os.makedirs(log_root, exist_ok=True)
+
+    # Replace/append TensorBoard
+    tb_replaced = False
+    for i, cb in enumerate(callbacks):
+        if isinstance(cb, TensorBoard):
+            callbacks[i] = TensorBoard(log_dir=log_root, histogram_freq=0)
+            tb_replaced = True
+            break
+    if not tb_replaced:
+        callbacks.append(TensorBoard(log_dir=log_root, histogram_freq=0))
+
+    # Replace/append CSVLogger
+    csv_replaced = False
+    for i, cb in enumerate(callbacks):
+        if isinstance(cb, CSVLogger):
+            callbacks[i] = CSVLogger(os.path.join(log_root, f"training_{rounds}r.csv"))
+            csv_replaced = True
+            break
+    if not csv_replaced:
+        callbacks.append(CSVLogger(os.path.join(log_root, f"training_{rounds}r.csv")))
+
     return callbacks
 
 def select_best_delta_key(

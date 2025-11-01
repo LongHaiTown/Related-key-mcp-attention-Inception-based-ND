@@ -34,13 +34,23 @@ def ECA_Module(input_tensor, gamma=2, b=1):
 
     return output
 
-def make_model_inception_present80(pairs=2, word_size=16):
+def make_model_inception(pairs: int = 2, plain_bits: int = 32):
     """
-    Inception-based Neural Distinguisher for PRESENT-80
-    Fixed PRESENT parameters: word_size = 16, pairs = 2
-    Input shape: (192,) corresponding to 2 pairs × 6 components × 16 bits
+    Inception-based Neural Distinguisher (generic across ciphers)
+
+    Input encoding per sample: concatenate [ΔC || C || C*] for `pairs` pairs.
+    - Vector length per pair: 3 * plain_bits
+    - Total input_dim = pairs * 3 * plain_bits
+    We reshape to (pairs, 6, word_size) with word_size = plain_bits // 2 (since 6 * word_size = 3 * plain_bits).
+
+    Requirements:
+    - plain_bits must be divisible by 2.
     """
-    input_dim = pairs * 6 * word_size  # = 192
+    if plain_bits % 2 != 0:
+        raise ValueError("plain_bits must be divisible by 2 for model reshaping (got %d)" % plain_bits)
+
+    word_size = plain_bits // 2
+    input_dim = pairs * 3 * plain_bits
     num_filters = 32
     d1, d2 = 64, 64
     depth = 5
@@ -48,9 +58,9 @@ def make_model_inception_present80(pairs=2, word_size=16):
     reg_param = 1e-4
 
     inp = Input(shape=(input_dim,))
-    x = Reshape((pairs, 6, word_size))(inp)     # (None, 2, 6, 16)
-    x = Permute((1, 3, 2))(x)                   # (None, 2, 16, 6)
-    x = Reshape((pairs * word_size, 6))(x)      # (None, 32, 6)
+    x = Reshape((pairs, 6, word_size))(inp)     # (None, pairs, 6, word_size)
+    x = Permute((1, 3, 2))(x)                   # (None, pairs, word_size, 6)
+    x = Reshape((pairs * word_size, 6))(x)      # (None, pairs*word_size, 6)
 
     # Inception block
     conv01 = Conv1D(num_filters, kernel_size=1, padding='same', kernel_regularizer=l2(reg_param))(x)

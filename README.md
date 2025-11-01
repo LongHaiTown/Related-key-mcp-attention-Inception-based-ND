@@ -14,7 +14,7 @@ This repository provides code for training and evaluating neural distinguishers 
 
 ---
 
-## Folder Structure
+## Folder structure
 
 ```
 .
@@ -24,54 +24,100 @@ This repository provides code for training and evaluating neural distinguishers 
 ├── RKmcp.py                 # Inception-based model architecture with attention
 ├── eval_nets.py             # Evaluation and statistical analysis functions
 ├── cipher/                  # PRESENT-80 cipher implementation
-├── requirements.txt         # zz
+├── requirements.txt         # Python dependencies
 └── README.md                 
 ```
 
 ---
 
-## Requirements
+## Requirements and setup (Windows)
 
-- Python zzz
-- TensorFlow zz
-- NumPy zz
-- CuPy (optional, for NVIDIA GPU acceleration)
-- scikit-learn zz
-- tqdm zz
-- scipy zz
+This project uses TensorFlow/Keras and CuPy. On Windows, you need a compatible CUDA toolkit to use CuPy. Steps below assume Command Prompt (cmd.exe).
 
-Install dependencies:
-```sh
+1) Create and activate a virtual environment
+```bat
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+2) Install core dependencies
+```bat
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
-If you have an NVIDIA GPU and CUDA installed, install the appropriate CuPy version (see [CuPy installation guide](https://docs.cupy.dev/en/stable/install.html)).  
-If you **do not have an NVIDIA GPU**, set `use_gpu=False` in all generator calls.
+
+3) Install CuPy matching your CUDA version (REQUIRED)
+- CUDA 12.x:
+```bat
+pip install cupy-cuda12x
+```
+- CUDA 11.x:
+```bat
+pip install cupy-cuda11x
+```
+Refer to the official guide if unsure: https://docs.cupy.dev/en/stable/install.html
+
+4) Quick verify
+```bat
+python -c "import cupy, tensorflow as tf; print('CuPy:', cupy.__version__); print('TF:', tf.__version__)"
+```
+
+Notes
+- CuPy is currently required because several modules import it at top-level.
+- If you later want CPU-only support, code changes are needed to make CuPy optional.
 
 ---
 
 ## Usage
 
-### 1. Train and Evaluate
-
-Edit `main.py` if needed, then run:
-```sh
+### 1) Quick start (defaults)
+```bat
 python main.py
 ```
-- The script will:
-  - Select the best delta key automatically.
-  - Generate training and validation data.
-  - Train the neural distinguisher.
-  - Evaluate the model and print statistical results.
+- Defaults: `--cipher present80`, `--rounds 7`, `--pairs 8`.
+- The script will: select best delta key, generate data, train the model, and run evaluation.
 
-### 2. Configuration
+### 2) Choose cipher dynamically
+```bat
+python main.py --cipher present80
+python main.py --cipher simon3264
+python main.py --cipher speck3264
+python main.py --cipher speck64128
+python main.py --cipher simmeck3264
+python main.py --cipher simmeck4896
+```
+Alternatively via environment variable (cmd.exe):
+```bat
+set CIPHER_NAME=simon3264
+python main.py
+```
 
-You can change parameters such as number of rounds, pairs, batch size, and epochs at the top of `main.py`.
+### 3) Override rounds and pairs
+```bat
+python main.py --rounds 9 --pairs 16
+:: short forms
+python main.py -r 9 -p 16
+```
+Or via environment variables:
+```bat
+set CIPHER_ROUNDS=9
+set PAIRS=16
+python main.py
+```
 
-### 3. Notes
+### 4) Outputs and logs
+- Checkpoints (per cipher and rounds):
+  - `checkpoints/<cipher>/<cipher>_best_<rounds>r.keras`
+  - `checkpoints/<cipher>/<cipher>_last_<rounds>r.weights.h5` (saved every epoch)
+  - `checkpoints/<cipher>/<cipher>_final_<rounds>r.keras` (saved after training)
+- Logs per run_id (timestamp):
+  - TensorBoard: `logs/<cipher>/<run_id>/`
+  - CSV: `logs/<cipher>/<run_id>/training_<rounds>r.csv`
+  - History JSON: `logs/<cipher>/<run_id>/history_<rounds>r.json`
 
-- For best performance, use a machine with an NVIDIA GPU and CUDA.
-- If you do not have a GPU, set `use_gpu=False` in `main.py` and `make_data_train.py`.
-- Model checkpoints and logs will be saved automatically.
+### 5) Notes
+- For best performance, use an NVIDIA GPU with proper CUDA + CuPy installation.
+- If CuPy/CUDA isn’t ready yet, consider disabling any GPU self-tests inside cipher modules (avoid running on import), or complete CUDA setup first.
 
 ---
 

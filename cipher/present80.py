@@ -1,4 +1,6 @@
 import cupy as cp
+# Canonical cipher identifier for logging/checkpoint naming
+cipher_name = "present80"
 plain_bits = 64
 key_bits = 80
 word_size = 4

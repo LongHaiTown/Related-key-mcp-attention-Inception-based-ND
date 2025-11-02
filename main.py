@@ -1,6 +1,6 @@
 from train_nets import (
     update_checkpoint_in_callbacks, select_best_delta_key,
-    integer_to_binary_array, NDCMultiPairGenerator, make_model_inception_present80, callbacks
+    integer_to_binary_array, NDCMultiPairGenerator, make_model_inception, callbacks
 )
 import argparse
 import importlib
@@ -55,7 +55,7 @@ if __name__ == "__main__":
     encrypt = cipher.encrypt
     batch_size = 5000
     val_batch_size = 20000
-    EPOCHS = 20
+    EPOCHS = 2
     NUM_SAMPLES_TRAIN = 10**6
     NUM_SAMPLES_TEST = 10**5
     # Use cipher's declared name if available
@@ -104,10 +104,10 @@ if __name__ == "__main__":
     X_train, Y_train = gen[0]
     print("Sample training data shapes:", X_train.shape, Y_train.shape)
     # === Build and train model ===
-    # Model input adapts to cipher plain_bits dynamically
     model = make_model_inception(pairs=pairs, plain_bits=plain_bits)
     optimizer = tf.keras.optimizers.Adam(amsgrad=True)
     model.compile(optimizer=optimizer, loss='mse', metrics=['acc'])
+    
     history = model.fit(
         gen,
         epochs=EPOCHS,
@@ -116,6 +116,22 @@ if __name__ == "__main__":
         callbacks=cb,
         verbose=True
     )
+
+    # === Save final model weights and architecture separately ===
+    ckpt_dir = os.path.join("checkpoints", cipher_name)
+    os.makedirs(ckpt_dir, exist_ok=True)
+    
+    # Save weights (small file)
+    weights_path = os.path.join(ckpt_dir, f"{cipher_name}_final_{n_round}r.weights.h5")
+    model.save_weights(weights_path)
+    
+    # Save architecture (tiny JSON file)
+    arch_path = os.path.join(ckpt_dir, f"{cipher_name}_final_{n_round}r_architecture.json")
+    with open(arch_path, 'w') as f:
+        f.write(model.to_json())
+    
+    print(f"Saved final model weights: {weights_path}")
+    print(f"Saved model architecture: {arch_path}")
 
     # Persist in-memory best model and training history
     ckpt_dir = os.path.join("checkpoints", cipher_name)

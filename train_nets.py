@@ -9,7 +9,7 @@ from tensorflow.keras.callbacks import (
 )
 from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
-from RKmcp import make_model_inception_present80
+from RKmcp import make_model_inception
 from make_data_train import NDCMultiPairGenerator
 
 
@@ -19,17 +19,36 @@ def integer_to_binary_array(int_val, num_bits):
 def cyclic_lr(num_epochs, high_lr, low_lr):
     return lambda i: low_lr + ((num_epochs - 1) - i % num_epochs) / (num_epochs - 1) * (high_lr - low_lr)
 
+def save_model_architecture(model, filepath):
+    """Save model architecture to JSON file"""
+    config_path = filepath.replace('.weights.h5', '_architecture.json')
+    with open(config_path, 'w') as f:
+        f.write(model.to_json())
+    return config_path
+
+def load_model_from_weights(weights_path, architecture_path, custom_objects=None):
+    """Load model from weights and architecture files"""
+    from tensorflow.keras.models import model_from_json
+    
+    # Load architecture
+    with open(architecture_path, 'r') as f:
+        model = model_from_json(f.read(), custom_objects=custom_objects)
+    
+    # Load weights
+    model.load_weights(weights_path)
+    return model
+
 lr_scheduler = LearningRateScheduler(cyclic_lr(num_epochs=10, high_lr=0.002, low_lr=0.0001))
 
 # Ensure checkpoints directory exists
 os.makedirs('checkpoints', exist_ok=True)
 
-# Use modern .keras format for best checkpoint
+# Use weights-only checkpoint for smaller file size
 checkpoint_cb = ModelCheckpoint(
-    filepath=os.path.join('checkpoints', 'best_model.keras'),
+    filepath=os.path.join('checkpoints', 'best_model.weights.h5'),
     monitor='val_loss',
     save_best_only=True,
-    save_weights_only=False,
+    save_weights_only=True,  # Changed to True
     verbose=1
 )
 
@@ -61,7 +80,8 @@ def update_checkpoint_in_callbacks(
     cipher_name: str = "present80",
     run_id: str | None = None,
     save_dir: str = 'checkpoints',
-    add_last_checkpoint: bool = True
+    add_last_checkpoint: bool = True,
+    save_weights_only: bool = True  # NEW: option to save weights only
 ):
     from tensorflow.keras.callbacks import ModelCheckpoint, TensorBoard, CSVLogger
 
@@ -69,13 +89,17 @@ def update_checkpoint_in_callbacks(
     ckpt_dir = os.path.join(save_dir, cipher_name)
     os.makedirs(ckpt_dir, exist_ok=True)
 
-    # Best model per cipher and rounds
-    best_path = os.path.join(ckpt_dir, f"{cipher_name}_best_{rounds}r.keras")
+    # Best model per cipher and rounds - weights only for smaller files
+    if save_weights_only:
+        best_path = os.path.join(ckpt_dir, f"{cipher_name}_best_{rounds}r.weights.h5")
+    else:
+        best_path = os.path.join(ckpt_dir, f"{cipher_name}_best_{rounds}r.keras")
+    
     new_best_ckpt = ModelCheckpoint(
         filepath=best_path,
         monitor='val_loss',
         save_best_only=True,
-        save_weights_only=False,
+        save_weights_only=save_weights_only,
         verbose=1
     )
 
@@ -95,7 +119,7 @@ def update_checkpoint_in_callbacks(
         last_ckpt = ModelCheckpoint(
             filepath=last_path,
             save_best_only=False,
-            save_weights_only=True,
+            save_weights_only=True,  # Always weights-only for frequent saves
             save_freq='epoch',
             verbose=0
         )

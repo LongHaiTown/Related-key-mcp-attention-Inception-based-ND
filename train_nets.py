@@ -11,6 +11,13 @@ from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
 from RKmcp import make_model_inception
 from make_data_train import NDCMultiPairGenerator
+from tensorflow.keras.models import load_model as keras_load_model
+from tensorflow.keras.layers import (
+    Input, Reshape, Permute, Conv1D, BatchNormalization, Activation, Add,
+    Flatten, Dense, GlobalAveragePooling2D
+)
+from tensorflow.keras.regularizers import l2
+from tensorflow.keras import Model
 
 
 def integer_to_binary_array(int_val, num_bits):
@@ -152,6 +159,133 @@ def update_checkpoint_in_callbacks(
         callbacks.append(CSVLogger(os.path.join(log_root, f"training_{rounds}r.csv")))
 
     return callbacks
+
+
+# ==== KD model builders and loader (for weights-only checkpoints) ====
+
+def kd_infer_word_size(cipher: str) -> int:
+    c = cipher.lower()
+    if c == "present" or c == "present80":
+        return 64
+    return 16
+
+
+def build_kd_teacher_model(
+    cipher: str,
+    pairs: int,
+    num_blocks: float,
+    num_filters: int = 32,
+    depth: int = 5,
+    reg_param: float = 1e-5,
+    word_size: int | None = None,
+) -> Model:
+    if word_size is None:
+        word_size = kd_infer_word_size(cipher)
+
+    # Defaults per cipher (mirror unified KD script)
+    if cipher.lower().startswith("simon") or cipher.lower() == "simon":
+        inception_kernels = [1, 2, 8]
+        residual_width = 3
+        head = "gap"
+        dense_dims = []
+    else:
+        inception_kernels = [1, 3, 5, 7]
+        residual_width = 4
+        head = "dense"
+        dense_dims = [512, 64, 64]
+
+    inp = Input(shape=(int(num_blocks * word_size * 2 * pairs),))
+    rs = Reshape((pairs, int(2 * num_blocks), word_size))(inp)
+    perm = Permute((1, 3, 2))(rs)
+
+    convs = [Conv1D(num_filters, k, padding="same", kernel_regularizer=l2(reg_param))(perm) for k in inception_kernels]
+    from tensorflow.keras.backend import concatenate
+
+    x = concatenate(convs, axis=-1)
+    x = BatchNormalization()(x)
+    x = Activation("relu")(x)
+    shortcut = x
+
+    ks = 3
+    for _ in range(depth):
+        x = Conv1D(num_filters * residual_width, ks, padding="same", kernel_regularizer=l2(reg_param))(shortcut)
+        x = BatchNormalization()(x)
+        x = Activation("relu")(x)
+        x = Conv1D(num_filters * residual_width, ks, padding="same", kernel_regularizer=l2(reg_param))(x)
+        x = BatchNormalization()(x)
+        x = Activation("relu")(x)
+        shortcut = Add()([shortcut, x])
+        ks += 2
+
+    if head == "gap":
+        dense0 = GlobalAveragePooling2D()(shortcut)
+        out = Dense(1, activation="sigmoid", kernel_regularizer=l2(reg_param))(dense0)
+    else:
+        dense0 = Flatten()(shortcut)
+        for dd in dense_dims:
+            dense0 = Dense(dd, kernel_regularizer=l2(reg_param))(dense0)
+            dense0 = BatchNormalization()(dense0)
+            dense0 = Activation("relu")(dense0)
+        x = Dense(1)(dense0)
+        from tensorflow import nn as tf_nn
+        out = tf_nn.sigmoid(x)
+
+    return Model(inputs=inp, outputs=out)
+
+
+def build_kd_student_model(
+    cipher: str,
+    pairs: int,
+    num_blocks: float,
+    num_filters: int = 32,
+    depth: int = 5,
+    reg_param: float = 1e-5,
+    word_size: int | None = None,
+) -> Model:
+    if word_size is None:
+        word_size = kd_infer_word_size(cipher)
+
+    init_kernel = 8 if (cipher.lower().startswith("simon") or cipher.lower() == "simon") else 7
+
+    inp = Input(shape=(int(num_blocks * word_size * 2 * pairs),))
+    rs = Reshape((pairs, int(2 * num_blocks), word_size))(inp)
+    perm = Permute((1, 3, 2))(rs)
+
+    x = Conv1D(num_filters, init_kernel, padding="same", kernel_regularizer=l2(reg_param))(perm)
+    x = BatchNormalization()(x)
+    x = Activation("relu")(x)
+    shortcut = x
+
+    ks = 3
+    for _ in range(depth):
+        x = Conv1D(num_filters, ks, padding="same", kernel_regularizer=l2(reg_param))(shortcut)
+        x = BatchNormalization()(x)
+        x = Activation("relu")(x)
+        x = Conv1D(num_filters, ks, padding="same", kernel_regularizer=l2(reg_param))(x)
+        x = BatchNormalization()(x)
+        x = Activation("relu")(x)
+        shortcut = Add()([shortcut, x])
+
+    dense0 = GlobalAveragePooling2D()(shortcut)
+    out = Dense(1, activation="sigmoid", kernel_regularizer=l2(reg_param))(dense0)
+    return Model(inputs=inp, outputs=out)
+
+
+def load_kd_model_from_path(model_path: str, cipher: str, pairs: int, num_blocks: float, depth: int, model_type: str = "teacher") -> Model:
+    """Load KD model. If given a weights-only path (*.weights.h5), rebuild and load.
+    model_type: 'teacher' or 'student'
+    """
+    ws = kd_infer_word_size(cipher)
+    if model_path.endswith(".weights.h5"):
+        if model_type == "teacher":
+            model = build_kd_teacher_model(cipher, pairs, num_blocks, depth=depth, word_size=ws)
+        else:
+            model = build_kd_student_model(cipher, pairs, num_blocks, depth=depth, word_size=ws)
+        model.compile(optimizer="adam", loss="mse", metrics=["acc"])  # ready for eval
+        model.load_weights(model_path)
+        return model
+    # full model
+    return keras_load_model(model_path)
 
 def select_best_delta_key(
     encryption_function, input_difference,

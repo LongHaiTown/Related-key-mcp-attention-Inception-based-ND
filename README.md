@@ -13,6 +13,7 @@ This repository provides code for training and evaluating neural distinguishers 
 - Training pipeline with Keras/TensorFlow, supporting both GPU (with CuPy) and CPU (with NumPy).
 - Evaluation scripts with statistical significance testing.
 - Input-difference sweep (PCA/KMeans metrics) and delta-key search tools with CSV logging.
+- Multi-stage (curriculum) training via `staged_train.py` (progressive rounds / LRs / epochs).
 
 ---
 
@@ -216,6 +217,81 @@ This overrides `--rounds` with the best round discovered and uses that round's b
   - CSV: `logs/<cipher>/<run_id>/training_<rounds>r.csv`
   - History JSON: `logs/<cipher>/<run_id>/history_<rounds>r.json`
  - Sweep and delta-key outputs: `differences_findings/logs/<cipher>/<timestamp>/`
+
+### 6.7) Staged (Curriculum) Training
+
+Use `staged_train.py` to incrementally train the distinguisher across multiple cipher round depths and learning rates. This is helpful when deeper-round training is unstable from scratch.
+
+Example:
+```bat
+python staged_train.py ^
+  --cipher present80 ^
+  --pairs 8 ^
+  --input-diff 0x00000080 ^
+  --delta-key-bit 107 ^
+  --stages-rounds 5,6,7 ^
+  --stages-epochs 15,10,10 ^
+  --stages-lrs 1e-3,5e-4,1e-4 ^
+  --stages-train-samples 800000,1000000,1200000 ^
+  --stages-val-samples 200000,250000,300000 ^
+  --batch-size 5000 ^
+  --val-batch-size 20000 ^
+  --use-gpu ^
+  --save-final
+```
+
+Key points:
+- Model is built once; rounds vary per stage through data generator.
+- Learning rate is adjusted before each stage (`Adam` optimizer reused).
+- Stage artifacts: `<cipher>_stage<i>_<rounds>r_last.weights.h5` in `staged_runs/`.
+- Final artifacts: `<cipher>_staged_final.weights.h5` and optionally `<cipher>_staged_final.keras`.
+- Combined JSON history: `<cipher>_staged_history.json` (list of per-stage histories).
+
+Tune curriculum:
+- Start with fewer rounds & higher LR, then increase rounds while reducing LR.
+- Adjust samples upward to stabilize deeper stages.
+
+Minimal run (defaults 3 stages of rounds=7):
+```bat
+python staged_train.py --cipher present80 --input-diff 0x00000080 --delta-key-bit 107 --use-gpu
+```
+
+**Resume from pre-trained model/weights:**
+
+Start from a full .keras model:
+```bat
+python staged_train.py ^
+  --cipher present80 ^
+  --pairs 8 ^
+  --input-diff 0x00000080 ^
+  --delta-key-bit 107 ^
+  --stages-rounds 6,7,8 ^
+  --stages-epochs 10,8,8 ^
+  --stages-lrs 5e-4,1e-4,5e-5 ^
+  --init-model checkpoints\present80\present80_final_7r.keras ^
+  --use-gpu
+```
+
+Start from weights only:
+```bat
+python staged_train.py ^
+  --cipher present80 ^
+  --pairs 8 ^
+  --input-diff 0x00000080 ^
+  --delta-key-bit 107 ^
+  --stages-rounds 7,8 ^
+  --stages-epochs 12,8 ^
+  --stages-lrs 5e-4,1e-4 ^
+  --init-weights checkpoints\present80\present80_last_7r.weights.h5 ^
+  --use-gpu
+```
+python staged_train.py --cipher present80 --pairs 8 --input-diff 0x00000080 --delta-key-bit 25 --stages-rounds 6,7 --stages-epochs 12,8 --stages-lrs 5e-4,1e-4 --init-weights checkpoints\present80\present80_last_7r.weights.h5 --use-gpu
+
+Notes:
+- `--init-model` loads a full .keras model (takes priority if both are provided).
+- `--init-weights` loads only weights into a fresh model architecture.
+- Ensure `--pairs` and cipher match the pre-trained model architecture.
+- Learning rate is reset to the first stage's LR value.
 
   ### Evaluate a trained model
   Use `eval_nets.py` to run repeated-test evaluation with statistical reporting (Z-score, p-value). Requires a saved `.keras` model file and runs the generator with GPU when available.

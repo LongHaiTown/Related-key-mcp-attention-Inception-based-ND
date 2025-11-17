@@ -44,6 +44,10 @@ def expand_key(k, t):
     return ks
 
 def convert_to_binary(arr):
+    # Ensure arr is a CuPy array for GPU operations
+    if not isinstance(arr, cp.ndarray):
+        arr = cp.asarray(arr)
+    
     nrow, ncol = arr.shape
     X = cp.zeros((nrow, ncol * WORD_SIZE()), dtype=cp.uint8)
     for i in range(WORD_SIZE()):
@@ -52,6 +56,10 @@ def convert_to_binary(arr):
     return X
 
 def convert_from_binary(arr, _dtype=cp.uint64):
+    # Ensure arr is a CuPy array for GPU operations
+    if not isinstance(arr, cp.ndarray):
+        arr = cp.asarray(arr)
+    
     num_words = arr.shape[1] // WORD_SIZE()
     X = cp.zeros((len(arr), num_words), dtype=_dtype)
     for i in range(num_words):

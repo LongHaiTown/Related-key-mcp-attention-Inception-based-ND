@@ -1,9 +1,9 @@
 {
   "cipher_module": "cipher.present80",
   "resolved_cipher": "present80",
-  "nr": 7,
+  "nr": 5,
   "pairs": 1,
-  "datasize": 50000,
+  "datasize": 5000,
   "clusters": 27,
   "max_bits": 64,
   "use_gpu": true,

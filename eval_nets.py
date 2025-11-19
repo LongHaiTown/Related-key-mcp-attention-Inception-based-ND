@@ -8,6 +8,31 @@ from make_data_train import NDCMultiPairGenerator
 from train_nets import integer_to_binary_array
 import importlib
 
+def count_model_params(model):
+    trainable = np.sum([np.prod(w.shape) for w in model.trainable_weights])
+    non_trainable = np.sum([np.prod(w.shape) for w in model.non_trainable_weights])
+    total = trainable + non_trainable
+    return total, trainable, non_trainable
+
+import time
+
+def measure_throughput(model, input_dim, batch_size=10_000, repeats=20):
+    X = np.random.randint(0, 2, size=(batch_size, input_dim), dtype=np.uint8)
+    X = X.astype(np.float32)
+
+    # warmup
+    _ = model.predict(X, batch_size=batch_size, verbose=0)
+
+    start = time.time()
+    for _ in range(repeats):
+        _ = model.predict(X, batch_size=batch_size, verbose=0)
+    end = time.time()
+
+    total_samples = batch_size * repeats
+    throughput = total_samples / (end - start)
+
+    return throughput, end - start
+
 def evaluate_with_statistics(
     model,
     round_number,
@@ -24,28 +49,22 @@ def evaluate_with_statistics(
     use_gpu: bool = True,
 ):
     """
-    Evaluate the model multiple times and compute statistics to check if the result is statistically significant.
-
-    Parameters:
-        model: Trained model.
-        round_number: Number of PRESENT rounds for test data generation.
-        n_repeat: Number of test set generations and evaluations (recommended: 20–30).
-        log_path: If provided, save log results to this file.
-        encryption_function: Cipher encryption function.
-        plain_bits: Number of bits in plaintext.
-        key_bits: Number of bits in key.
-        input_difference: Input difference (int or array).
-        delta_key: Key difference (array).
-        pairs: Number of pairs per sample.
-
-    Returns:
-        dict: Contains avg_acc, std_acc, z_score, p_value.
+    Evaluate the model multiple times and compute statistics, including:
+    - accuracy
+    - std
+    - z-score, p-value
+    - parameter count
+    - runtime throughput
     """
-    print(f"\n📊 Evaluating model on {n_repeat} fresh test sets for round {round_number}...")
+
+    print(f"\n=== Evaluating model on {n_repeat}× fresh test sets (round {round_number}) ===")
 
     if encryption_function is None or input_difference is None or delta_key is None:
         raise ValueError("encryption_function, input_difference, and delta_key must be provided.")
 
+    # ----------------------------------------------------
+    # 1. Repeat testing for statistical significance
+    # ----------------------------------------------------
     test_accs = []
     for i in tqdm(range(n_repeat)):
         test_gen = NDCMultiPairGenerator(
@@ -63,39 +82,73 @@ def evaluate_with_statistics(
         _, acc = model.evaluate(test_gen, verbose=0)
         test_accs.append(acc)
 
-    # Compute statistics
     accs = np.array(test_accs)
     avg_acc = np.mean(accs)
     std_acc = np.std(accs)
 
-    # Z-score: deviation from random guessing (50%)
+    # ----------------------------------------------------
+    # 2. Statistical tests vs random guessing (0.5)
+    # ----------------------------------------------------
     mean_random = 0.5
-    std_random = 0.0005  # For each test set of 1 million samples
+    std_random = 0.0005
     std_mean = std_random / np.sqrt(n_repeat)
     z_score = (avg_acc - mean_random) / std_mean
     p_value = 1 - norm.cdf(z_score)
 
-    print(f"\n✅ Average Accuracy: {avg_acc:.5f} ± {std_acc:.5f}")
-    print(f"📐 Z-score = {z_score:.2f},  P-value = {p_value:.4e}")
-    if p_value < 0.01:
-        print("✨ Statistically significant improvement over random.")
-    else:
-        print("⚠️  Accuracy may still be due to random guessing.")
+    print(f"\nAccuracy: {avg_acc:.6f} ± {std_acc:.6f}")
+    print(f"Z-score: {z_score:.2f}  P-value: {p_value:.3e}")
+    print("Significant." if p_value < 0.01 else "Not significant.")
 
-    # Save log if needed
+    # ----------------------------------------------------
+    # 3. Parameter Count
+    # ----------------------------------------------------
+    total_params, trainable_params, nontrainable_params = count_model_params(model)
+
+    print(f"\n--- Model Parameters ---")
+    print(f"Total params         : {total_params:,}")
+    print(f"Trainable params     : {trainable_params:,}")
+    print(f"Non-trainable params : {nontrainable_params:,}")
+
+    # ----------------------------------------------------
+    # 4. Runtime Throughput
+    # ----------------------------------------------------
+    input_dim = model.input_shape[1]
+    throughput, total_time = measure_throughput(
+        model,
+        input_dim=input_dim,
+        batch_size=batch_size,
+        repeats=20
+    )
+
+    print(f"\n--- Runtime Efficiency ---")
+    print(f"Throughput              : {throughput:,.0f} samples/sec")
+    print(f"Time for 1M samples     : {1_000_000/throughput:.3f} sec")
+    print(f"Measured over {total_time:.3f} seconds")
+
+    # ----------------------------------------------------
+    # 5. Save log (optional)
+    # ----------------------------------------------------
     if log_path:
-        with open(log_path, 'w') as f:
+        with open(log_path, "w") as f:
             for i, acc in enumerate(accs):
                 f.write(f"Test {i+1}: {acc:.6f}\n")
-            f.write(f"\nAverage: {avg_acc:.6f}, Std: {std_acc:.6f}\n")
-            f.write(f"Z-score: {z_score:.2f}, P-value: {p_value:.4e}\n")
+            f.write(f"\nAverage Accuracy: {avg_acc:.6f}\n")
+            f.write(f"Std Accuracy:     {std_acc:.6f}\n")
+            f.write(f"Z-score:          {z_score:.2f}\n")
+            f.write(f"P-value:          {p_value:.4e}\n")
+            f.write(f"\nTotal params:     {total_params:,}\n")
+            f.write(f"Trainable params: {trainable_params:,}\n")
+            f.write(f"Throughput:       {throughput:,.0f} samples/sec\n")
 
     return {
-        'avg_acc': avg_acc,
-        'std_acc': std_acc,
-        'z_score': z_score,
-        'p_value': p_value
+        "avg_acc": avg_acc,
+        "std_acc": std_acc,
+        "z_score": z_score,
+        "p_value": p_value,
+        "total_params": total_params,
+        "throughput": throughput
     }
+
 
 
 def _parse_delta_key_from_hex(hex_str: str, key_bits: int) -> np.ndarray:
@@ -193,14 +246,12 @@ def main():
     else:
         raise ValueError(f"Unsupported model file type: {suffix}. Use .keras or .h5/.hdf5")
     
-    if model.compiled_loss is None:
-        print("[info] Compiling model for evaluation (binary_crossentropy, accuracy).")
-        model.compile(
-            loss="binary_crossentropy",
-            optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
-            metrics=["accuracy"],
-        )
-
+    model.compile(
+        loss="binary_crossentropy",
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+        metrics=["accuracy"],
+    )
+    
     # Run evaluation
     stats = evaluate_with_statistics(
         model,

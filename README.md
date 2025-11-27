@@ -309,6 +309,8 @@ Notes:
     --batch-size 10000
   ```
 
+  <!-- python eval_nets.py --cipher-module cipher.present80 --model-path checkpoints\present80\present80_best_8r.weights.h5 --rounds 8 --pairs 8 --input-diff 0x00000080 --delta-key-bit 56 --n-repeat 2 --test-samples 1000000 --batch-size 10000 -->
+
   If your delta-key is a bitmask (multi-bit), pass it as hex:
   ```bat
   python eval_nets.py ^

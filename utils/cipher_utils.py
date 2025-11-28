@@ -31,7 +31,17 @@ def resolve_cipher_module(module_path: str):
 
 
 def integer_to_binary_array(int_val: int, num_bits: int):
-    return cp.array([int(i) for i in bin(int_val)[2:].zfill(num_bits)], dtype=cp.uint8).reshape(1, num_bits)
+    """Convert integer to 1xN bit array (unsigned), masking to `num_bits`.
+
+    Ensures output shape is (1, num_bits) even if `int_val` exceeds the bit width.
+    Works with CuPy if available, else NumPy fallback via the same alias `cp`.
+    """
+    if num_bits <= 0:
+        raise ValueError(f"num_bits must be positive, got {num_bits}")
+    mask = (1 << num_bits) - 1
+    v = int(int_val) & mask
+    bits = bin(v)[2:].zfill(num_bits)
+    return cp.array([int(b) for b in bits], dtype=cp.uint8).reshape(1, num_bits)
 
 
 def build_generator_for_diff(cipher_mod, input_diff_int: int, *, nr: int, pairs: int, n_samples: int,

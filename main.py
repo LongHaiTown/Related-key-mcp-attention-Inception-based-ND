@@ -80,6 +80,17 @@ def parse_args():
         default=os.getenv("DELTA_KEY_BIT", None),
         help="Manually specify delta key bit index to use (skip automatic delta-key search)."
     )
+    parser.add_argument(
+        "--difference",
+        type=str,
+        default=os.getenv("DIFFERENCE", None),
+        help="Optional hex/int difference. If bit-length > plain_bits or --combined-diff set, treated as concatenated (plain_bits + key_bits)."
+    )
+    parser.add_argument(
+        "--combined-diff",
+        action="store_true",
+        help="Force --difference to be interpreted as combined (plain_bits + key_bits)."
+    )
     args, _ = parser.parse_known_args()
     return args
 
@@ -216,6 +227,18 @@ def choose_input_difference(args) -> int:
     return int(str(args.input_diff), 16)
 
 
+def _int_to_bits(int_val: int, num_bits: int) -> np.ndarray:
+    return np.array([int(b) for b in bin(int_val)[2:].zfill(num_bits)], dtype=np.uint8)
+
+
+def _split_combined_difference(diff_int: int, plain_bits: int, key_bits: int):
+    bits = _int_to_bits(diff_int, plain_bits + key_bits)
+    delta_plain_bits = bits[:plain_bits]
+    delta_key_bits = bits[plain_bits:]
+    plain_int = int(''.join(str(x) for x in delta_plain_bits.tolist()), 2)
+    return plain_int, delta_plain_bits, delta_key_bits
+
+
 def choose_delta_key(encrypt, plain_bits: int, key_bits: int, n_round: int, pairs: int, input_difference: int):
     best_bit, best_score, all_scores = select_best_delta_key(
         encryption_function=encrypt,
@@ -335,44 +358,84 @@ def run():
     # Callbacks
     cb = update_checkpoint_in_callbacks(callbacks, rounds=n_round, cipher_name=cipher_name, run_id=run_id)
 
-    # Input difference and (optionally) round selection from multi-round sweep
+    # === Input difference handling (extended) ===
     input_difference = None
-    if args.sweep_parent or args.auto_latest_sweep:
-        parent_dir = Path(args.sweep_parent) if args.sweep_parent else _find_latest_sweep_parent(cipher_name)
-        best_nr, best_bit_pos, best_input_difference, best_csv = pick_best_round_and_input_diff(parent_dir, args.diff_metric)
-        print(
-            f"[auto] Picked best round and input difference from multi-sweep ({args.diff_metric}): "
-            f"nr={best_nr}, bit_pos={best_bit_pos}, hex=0x{best_input_difference:016X}\n"
-            f"       source CSV: {best_csv}"
-        )
-        n_round = int(best_nr)
-        input_difference = int(best_input_difference)
-    else:
-        # Fallback to single CSV-based selection or manual hex
-        input_difference = choose_input_difference(args)
+    combined_from_user = False
+    user_delta_plain = None
+    user_delta_key = None
 
-    # Delta-key selection / manual override
-    if args.delta_key_bit is not None:
-        manual_bit = int(args.delta_key_bit)
-        if manual_bit < 0 or manual_bit >= key_bits:
-            raise ValueError(f"--delta-key-bit {manual_bit} out of range (0..{key_bits-1})")
-        delta_plain = integer_to_binary_array(input_difference, plain_bits)
-        delta_key = np.zeros(key_bits, dtype=np.uint8)
-        delta_key[manual_bit] = 1
-        best_bit = manual_bit
-        best_score = None
-        print(f"[manual] Using provided delta key bit: {best_bit}")
+    if args.difference:
+        # Direct difference provided
+        try:
+            user_diff_int = int(args.difference, 0)
+        except Exception:
+            user_diff_int = int(args.difference)
+        if args.combined_diff or user_diff_int.bit_length() > plain_bits:
+            combined_from_user = True
+            input_difference, d_plain_bits, d_key_bits = _split_combined_difference(
+                user_diff_int, plain_bits, key_bits
+            )
+            # Shape to (plain_bits,) & (key_bits,)
+            user_delta_plain = d_plain_bits.astype(np.uint8)
+            user_delta_key = d_key_bits.astype(np.uint8)
+            print(f"[difference] Using combined difference (plain+key): 0x{user_diff_int:X}")
+            print(f"            delta_plain HW={int(user_delta_plain.sum())} bits={[i for i,v in enumerate(user_delta_plain) if v]}")
+            print(f"            delta_key  HW={int(user_delta_key.sum())} bits={[i for i,v in enumerate(user_delta_key) if v]}")
+        else:
+            input_difference = user_diff_int
+            print(f"[difference] Using provided plain input difference: 0x{input_difference:X}")
     else:
-        best_bit, best_score, delta_plain, delta_key = choose_delta_key(
-            encrypt, plain_bits, key_bits, n_round, pairs, input_difference
-        )
-    
-    # In case of not finding any good bit for delta_key, use good bit of previous round
-    # === Prepare delta_plain and delta_key ===
-    # delta_plain = integer_to_binary_array(input_difference, plain_bits)
-    # delta_key = np.zeros(key_bits, dtype=np.uint8)
-    # delta_key[107] = 1
-    
+        # Existing sweep / manual logic
+        if args.sweep_parent or args.auto_latest_sweep:
+            parent_dir = Path(args.sweep_parent) if args.sweep_parent else _find_latest_sweep_parent(cipher_name)
+            best_nr, best_bit_pos, best_input_difference, best_csv = pick_best_round_and_input_diff(parent_dir, args.diff_metric)
+            print(
+                f"[auto] Picked best round and input difference from multi-sweep ({args.diff_metric}): "
+                f"nr={best_nr}, bit_pos={best_bit_pos}, hex=0x{best_input_difference:016X}\n"
+                f"       source CSV: {best_csv}"
+            )
+            n_round = int(best_nr)
+            input_difference = int(best_input_difference)
+        else:
+            input_difference = choose_input_difference(args)
+
+    # === Delta-key determination ===
+    if combined_from_user:
+        # Build arrays from user supplied combined diff
+        delta_plain = user_delta_plain
+        delta_key = user_delta_key
+        # Override delta-key if --delta-key-bit passed
+        if args.delta_key_bit is not None:
+            mb = int(args.delta_key_bit)
+            if mb < 0 or mb >= key_bits:
+                raise ValueError(f"--delta-key-bit {mb} out of range (0..{key_bits-1})")
+            delta_key = np.zeros(key_bits, dtype=np.uint8)
+            delta_key[mb] = 1
+            print(f"[override] Replacing combined delta_key with manual bit={mb}")
+        best_bit = [i for i,v in enumerate(delta_key) if v]
+        best_score = None
+    else:
+        if args.delta_key_bit is not None:
+            manual_bit = int(args.delta_key_bit)
+            if manual_bit < 0 or manual_bit >= key_bits:
+                raise ValueError(f"--delta-key-bit {manual_bit} out of range (0..{key_bits-1})")
+            delta_plain = integer_to_binary_array(input_difference, plain_bits)
+            delta_key = np.zeros(key_bits, dtype=np.uint8)
+            delta_key[manual_bit] = 1
+            best_bit = manual_bit
+            best_score = None
+            print(f"[manual] Using provided delta key bit: {best_bit}")
+        else:
+            best_bit, best_score, delta_plain, delta_key = choose_delta_key(
+                encrypt, plain_bits, key_bits, n_round, pairs, input_difference
+            )
+
+    # Ensure delta arrays are 1D uint8 for generator
+    if delta_plain.ndim > 1:
+        delta_plain = delta_plain.reshape(-1)
+    if delta_key.ndim > 1:
+        delta_key = delta_key.reshape(-1)
+
     # Data generators
     gen, gen_val = make_generators(
         encrypt, plain_bits, key_bits, n_round, pairs,

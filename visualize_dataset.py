@@ -359,7 +359,12 @@ def main():
     except Exception:
         diff_token = str(diff_int)
     
-    run_folder = f"{cipher_name}_{args.scenario}_r{args.rounds}_p{args.pairs}_{diff_token}"
+    # Include key-bit in folder name for related-key scenario when explicitly provided
+    key_suffix = ""
+    if args.scenario == "related-key" and isinstance(args.key_bit, int) and args.key_bit >= 0:
+        key_suffix = f"_key_bits{args.key_bit}"
+
+    run_folder = f"{cipher_name}_{args.scenario}_r{args.rounds}_p{args.pairs}_{diff_token}{key_suffix}"
     if args.add_timestamp:
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         run_folder = f"{run_folder}_{timestamp}"

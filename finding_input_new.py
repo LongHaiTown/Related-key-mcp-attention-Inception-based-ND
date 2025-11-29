@@ -17,7 +17,7 @@ def parse_args():
     ap.add_argument("--scenario", choices=["single-key", "related-key"], default="single-key")
     ap.add_argument("--rounds", type=int, default=5)
     ap.add_argument("--pairs", type=int, default=1, help="số cặp (pairs) dùng khi tạo dữ liệu")
-    ap.add_argument("--method", type=str, default="evo", choices=["evo", "pso", "ga", "de", "aco", "sa", "gwo"], help="optimizer method")
+    # method removed: optimizer now only uses evo internally
     ap.add_argument("--epsilon", type=float, default=0.1, help="bias threshold epsilon for optimizer")
     ap.add_argument("--out", default="", help="base output dir for optimizer logs (default: ./results)")
     ap.add_argument("--log-file", default="", help="optional path to write log output")
@@ -93,8 +93,8 @@ def find_input_differences_with_cli(args, out_dir: str | None = None):
     log_prefix = os.path.join(base_out, s_tag)
 
     logging.info(
-        "Running optimizer | cipher=%s scenario=%s rounds=%d method=%s epsilon=%.6f log_prefix=%s",
-        args.cipher, args.scenario, args.rounds, args.method, args.epsilon, log_prefix,
+        "Running optimizer | cipher=%s scenario=%s rounds=%d epsilon=%.6f log_prefix=%s",
+        args.cipher, args.scenario, args.rounds, args.epsilon, log_prefix,
     )
 
     best_differences, highest_round = optimizer.optimize(
@@ -104,7 +104,6 @@ def find_input_differences_with_cli(args, out_dir: str | None = None):
         scenario=args.scenario,
         log_file=log_prefix,
         epsilon=args.epsilon,
-        method=args.method,
         rounds=args.rounds,
     )
 
@@ -294,21 +293,42 @@ def main():
             cipher = importlib.import_module(f"ciphers.{args.cipher}")
     logging.info("Loaded cipher.%s | plain_bits=%d key_bits=%d", args.cipher, cipher.plain_bits, cipher.key_bits)
 
-    _t0_opt = time.time()
-    best_differences, highest_round, log_prefix = find_input_differences_with_cli(args)
-    _t1_opt = time.time()
-    _opt_secs = _t1_opt - _t0_opt
-    diffs_hex = [hex(int(x)) for x in (best_differences or [])]
+    # If user provides a difference, skip optimizer and use it directly
+    best_differences = []
+    highest_round = None
+    log_prefix = ""
+    diffs_hex = []
+    if str(args.difference).strip():
+        # Normalize provided difference to hex string
+        try:
+            diff_int = int(args.difference, 0)
+        except Exception:
+            diff_int = int(args.difference)
+        diffs_hex = [hex(int(diff_int))]
+        _opt_secs = 0.0
 
-    print("\n=== Input Difference Search Result ===")
-    print(f"Cipher: {args.cipher} | Scenario: {args.scenario} | Rounds: {args.rounds}")
-    print(f"Method: {args.method} | Epsilon: {args.epsilon}")
-    print(f"Top differences: {diffs_hex[:10]}")
-    print(f"Highest round: {highest_round}")
-    print(f"Optimizer logs at: {log_prefix}*")
-    print(f"Summary: rounds={args.rounds} | highest_non_random_round={highest_round} | optimizer_time={_opt_secs:.3f}s")
-    # In ra chi tiết delta_plain / delta_key cho các khác biệt tốt đầu tiên
-    _print_top_differences_details(diffs_hex, cipher_mod=cipher, scenario=args.scenario, top_k=5)
+        print("\n=== Input Difference (Provided) ===")
+        print(f"Cipher: {args.cipher} | Scenario: {args.scenario} | Rounds: {args.rounds}")
+        print(f"Difference: {diffs_hex[0]} (optimizer skipped)")
+        # Print detail for the provided difference only
+        _print_top_differences_details(diffs_hex, cipher_mod=cipher, scenario=args.scenario, top_k=1)
+    else:
+        # Run optimizer to find candidate differences
+        _t0_opt = time.time()
+        best_differences, highest_round, log_prefix = find_input_differences_with_cli(args)
+        _t1_opt = time.time()
+        _opt_secs = _t1_opt - _t0_opt
+        diffs_hex = [hex(int(x)) for x in (best_differences or [])]
+
+        print("\n=== Input Difference Search Result ===")
+        print(f"Cipher: {args.cipher} | Scenario: {args.scenario} | Rounds: {args.rounds}")
+        print(f"Epsilon: {args.epsilon}")
+        print(f"Top differences: {diffs_hex[:10]}")
+        print(f"Highest round: {highest_round}")
+        print(f"Optimizer logs at: {log_prefix}*")
+        print(f"Summary: rounds={args.rounds} | highest_non_random_round={highest_round} | optimizer_time={_opt_secs:.3f}s")
+        # In ra chi tiết delta_plain / delta_key cho các khác biệt tốt đầu tiên
+        _print_top_differences_details(diffs_hex, cipher_mod=cipher, scenario=args.scenario, top_k=5)
 
     # Optional delta-key sweep (use provided difference or the top optimizer difference)
     if args.sweep_dk:

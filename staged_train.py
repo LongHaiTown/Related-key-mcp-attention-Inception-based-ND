@@ -6,7 +6,7 @@ import numpy as np
 import tensorflow as tf
 from pathlib import Path
 
-TRAIN_NUM_SAMPLES = 1_000_000
+TRAIN_NUM_SAMPLES = 10_000_000
 VAL_NUM_SAMPLES = 250_000
 # CuPy compatibility check
 try:
@@ -30,7 +30,19 @@ def parse_args():
     ap.add_argument("--cipher", type=str, default="present80", help="Cipher module under cipher/ (e.g. present80, simon3264)")
     ap.add_argument("--pairs", type=int, default=8, help="Pairs per sample")
     ap.add_argument("--input-diff", type=str, default="0x00000080", help="Hex input difference (e.g. 0x80)")
+    ap.add_argument(
+        "--difference",
+        type=str,
+        default=None,
+        help="Optional hex/int difference. If bit-length > plain_bits or --combined-diff set, treated as concatenated (plain_bits + key_bits).",
+    )
+    ap.add_argument(
+        "--combined-diff",
+        action="store_true",
+        help="Force --difference to be interpreted as combined (plain_bits + key_bits).",
+    )
     ap.add_argument("--delta-key-bit", type=int, default=None, help="Optional delta key bit index (0-based). If omitted -> all zeros")
+    ap.add_argument("--delta-key-hex", type=str, default=None, help="Optional delta key hex mask (e.g., 0x1). Overrides combined delta_key if provided.")
     ap.add_argument("--stages-rounds", type=str, default="7,7,7", help="Comma list of rounds per stage")
     ap.add_argument("--stages-epochs", type=str, default="20,10,10", help="Comma list of epochs per stage")
     ap.add_argument("--stages-lrs", type=str, default="1e-3,5e-4,1e-4", help="Comma list of learning rates per stage")
@@ -57,6 +69,27 @@ def build_delta_key(bit_idx, key_bits, use_gpu=False):
             raise ValueError(f"--delta-key-bit {bit_idx} out of range (0..{key_bits-1})")
         dk[bit_idx] = 1
     return dk
+
+
+def _int_to_bits(int_val: int, num_bits: int) -> np.ndarray:
+    return np.array([int(b) for b in bin(int_val)[2:].zfill(num_bits)], dtype=np.uint8)
+
+
+def _parse_delta_key_from_hex(hex_str: str, key_bits: int) -> np.ndarray:
+    mask = int(hex_str, 16)
+    arr = np.zeros(key_bits, dtype=np.uint8)
+    for i in range(key_bits):
+        arr[i] = (mask >> i) & 1
+    return arr
+
+
+def _split_combined_difference(diff_int: int, plain_bits: int, key_bits: int):
+    """Split combined integer into (plain_int, delta_plain_bits, delta_key_bits)."""
+    bits = _int_to_bits(diff_int, plain_bits + key_bits)
+    d_plain = bits[:plain_bits]
+    d_key = bits[plain_bits:]
+    plain_int = int(''.join(str(x) for x in d_plain.tolist()), 2)
+    return plain_int, d_plain, d_key
 
 
 def build_or_load_initial_model(pairs, plain_bits, init_model_path=None, init_weights_path=None, lr=1e-3):
@@ -99,18 +132,77 @@ def run_stage_training(args):
     plain_bits = cipher_mod.plain_bits
     key_bits = cipher_mod.key_bits
 
-    input_diff_int = int(args.input_diff, 16)
-    delta_plain = integer_to_binary_array(input_diff_int, plain_bits)
-    
+    # Prepare deltas (supports combined differences with optional override)
+    delta_key = None
+    # Handle user-provided difference first
+    if args.difference:
+        try:
+            user_diff_int = int(args.difference, 0)
+        except Exception:
+            user_diff_int = int(args.difference)
+
+        if args.combined_diff or user_diff_int.bit_length() > plain_bits:
+            input_diff_int, d_plain_bits, d_key_bits = _split_combined_difference(user_diff_int, plain_bits, key_bits)
+            print(f"[difference] Using combined difference (plain+key): 0x{user_diff_int:X}")
+            print(f"            delta_plain HW={int(d_plain_bits.sum())} bits={[i for i,v in enumerate(d_plain_bits) if v]}")
+            print(f"            delta_key  HW={int(d_key_bits.sum())} bits={[i for i,v in enumerate(d_key_bits) if v]}")
+            delta_plain = integer_to_binary_array(input_diff_int, plain_bits)
+            delta_key = d_key_bits.astype(np.uint8)
+            # Overrides
+            if args.delta_key_bit is not None:
+                mb = int(args.delta_key_bit)
+                if mb < 0 or mb >= key_bits:
+                    raise ValueError(f"--delta-key-bit out of range (0..{key_bits-1})")
+                delta_key = np.zeros(key_bits, dtype=np.uint8)
+                delta_key[mb] = 1
+                print(f"[override] Replacing combined delta_key with manual bit={mb}")
+            elif args.delta_key_hex:
+                delta_key = _parse_delta_key_from_hex(args.delta_key_hex, key_bits)
+                print("[override] Replacing combined delta_key with provided --delta-key-hex mask")
+        else:
+            # Plain-only
+            input_diff_int = user_diff_int
+            print(f"[difference] Using provided plain input difference: 0x{input_diff_int:X}")
+            delta_plain = integer_to_binary_array(input_diff_int, plain_bits)
+            # Determine delta_key from overrides or default to zeros
+            if args.delta_key_bit is not None:
+                delta_key = _parse_delta_key_from_hex("0x0", key_bits)  # start zeros
+                mb = int(args.delta_key_bit)
+                if mb < 0 or mb >= key_bits:
+                    raise ValueError(f"--delta-key-bit out of range (0..{key_bits-1})")
+                delta_key[mb] = 1
+            elif args.delta_key_hex:
+                delta_key = _parse_delta_key_from_hex(args.delta_key_hex, key_bits)
+            else:
+                delta_key = np.zeros(key_bits, dtype=np.uint8)
+                print("[info] No delta-key override provided; using delta_key = 0 (no related-key).")
+    else:
+        # Backward-compatible path using --input-diff and delta-key-bit
+        input_diff_int = int(args.input_diff, 16)
+        delta_plain = integer_to_binary_array(input_diff_int, plain_bits)
+        if args.delta_key_bit is not None:
+            delta_key = _parse_delta_key_from_hex("0x0", key_bits)
+            mb = int(args.delta_key_bit)
+            if mb < 0 or mb >= key_bits:
+                raise ValueError(f"--delta-key-bit out of range (0..{key_bits-1})")
+            delta_key[mb] = 1
+        elif args.delta_key_hex:
+            delta_key = _parse_delta_key_from_hex(args.delta_key_hex, key_bits)
+        else:
+            delta_key = np.zeros(key_bits, dtype=np.uint8)
+            print("[info] No --delta-key-bit/--delta-key-hex provided; using delta_key = 0 (no related-key).")
+
     # Ensure delta_plain uses correct backend
     if args.use_gpu and _CUPY_AVAILABLE:
         if isinstance(delta_plain, np.ndarray):
             delta_plain = cp.asarray(delta_plain)
+        if isinstance(delta_key, np.ndarray):
+            delta_key = cp.asarray(delta_key)
     else:
         if hasattr(delta_plain, '__cuda_array_interface__'):
             delta_plain = cp.asnumpy(delta_plain)
-    
-    delta_key = build_delta_key(args.delta_key_bit, key_bits, use_gpu=args.use_gpu)
+        if hasattr(delta_key, '__cuda_array_interface__'):
+            delta_key = cp.asnumpy(delta_key)
 
     rounds_list = _comma_list_to_numbers(args.stages_rounds, int)
     epochs_list = _comma_list_to_numbers(args.stages_epochs, int)

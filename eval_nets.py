@@ -159,6 +159,21 @@ def _parse_delta_key_from_hex(hex_str: str, key_bits: int) -> np.ndarray:
     return arr
 
 
+def _int_to_bits(int_val: int, num_bits: int) -> np.ndarray:
+    return np.array([int(b) for b in bin(int_val)[2:].zfill(num_bits)], dtype=np.uint8)
+
+
+def _split_combined_difference(diff_int: int, plain_bits: int, key_bits: int):
+    """Split a combined (plain_bits + key_bits) difference integer into
+    (plain_int, delta_plain_bits, delta_key_bits).
+    """
+    bits = _int_to_bits(diff_int, plain_bits + key_bits)
+    delta_plain_bits = bits[:plain_bits]
+    delta_key_bits = bits[plain_bits:]
+    plain_int = int(''.join(str(x) for x in delta_plain_bits.tolist()), 2)
+    return plain_int, delta_plain_bits, delta_key_bits
+
+
 def _import_cipher_module(module_path: str):
     try:
         return importlib.import_module(module_path)
@@ -183,6 +198,17 @@ def main():
     parser.add_argument("--rounds", "-r", type=int, default=7, help="Number of cipher rounds for evaluation")
     parser.add_argument("--pairs", "-p", type=int, default=8, help="Pairs per sample")
     parser.add_argument("--input-diff", type=str, default="0x00000080", help="Input difference hex (e.g., 0x80)")
+    parser.add_argument(
+        "--difference",
+        type=str,
+        default=None,
+        help="Optional hex/int difference. If bit-length > plain_bits or --combined-diff set, treated as concatenated (plain_bits + key_bits).",
+    )
+    parser.add_argument(
+        "--combined-diff",
+        action="store_true",
+        help="Force --difference to be interpreted as combined (plain_bits + key_bits).",
+    )
     group = parser.add_mutually_exclusive_group(required=False)
     group.add_argument(
         "--delta-key-bit",
@@ -194,9 +220,9 @@ def main():
         type=str,
         help="Delta key bitmask as hex (e.g., 0x00000000000000000001). If omitted and --delta-key-bit not provided, uses delta_key=0 (no related-key).",
     )
-    parser.add_argument("--n-repeat", type=int, default=20, help="Number of repeated test evaluations")
-    parser.add_argument("--test-samples", type=int, default=1_000_000, help="Samples per test set")
-    parser.add_argument("--batch-size", type=int, default=10_000, help="Batch size for test generator")
+    parser.add_argument("--n-repeat", type=int, default=10, help="Number of repeated test evaluations")
+    parser.add_argument("--test-samples", type=int, default=100_000, help="Samples per test set")
+    parser.add_argument("--batch-size", type=int, default=5_000, help="Batch size for test generator")
     # Always use GPU path in generator (if available); no CPU fallback flag
     parser.add_argument("--log-path", type=str, default=None, help="Optional path to save evaluation log")
 
@@ -208,19 +234,71 @@ def main():
     plain_bits = cipher_mod.plain_bits
     key_bits = cipher_mod.key_bits
 
-    # Prepare deltas
-    input_difference = int(args.input_diff, 16)
-    if args.delta_key_bit is not None:
-        if args.delta_key_bit < 0 or args.delta_key_bit >= key_bits:
-            raise ValueError(f"--delta-key-bit out of range (0..{key_bits-1})")
-        delta_key = np.zeros(key_bits, dtype=np.uint8)
-        delta_key[int(args.delta_key_bit)] = 1
-    elif args.delta_key_hex:
-        delta_key = _parse_delta_key_from_hex(args.delta_key_hex, key_bits)
+    # Prepare deltas (supports combined differences with optional override)
+    input_difference = None
+    delta_key = None
+
+    if args.difference:
+        # Direct difference provided (hex or int, auto base)
+        try:
+            user_diff_int = int(args.difference, 0)
+        except Exception:
+            user_diff_int = int(args.difference)
+
+        if args.combined_diff or user_diff_int.bit_length() > plain_bits:
+            # Treat as combined (plain_bits + key_bits)
+            input_difference, d_plain_bits, d_key_bits = _split_combined_difference(
+                user_diff_int, plain_bits, key_bits
+            )
+            delta_key = d_key_bits.astype(np.uint8)
+            print(f"[difference] Using combined difference (plain+key): 0x{user_diff_int:X}")
+            print(
+                f"            delta_plain HW={int(d_plain_bits.sum())} bits={[i for i,v in enumerate(d_plain_bits) if v]}"
+            )
+            print(
+                f"            delta_key  HW={int(d_key_bits.sum())} bits={[i for i,v in enumerate(d_key_bits) if v]}"
+            )
+            # Allow override by delta-key options
+            if args.delta_key_bit is not None:
+                mb = int(args.delta_key_bit)
+                if mb < 0 or mb >= key_bits:
+                    raise ValueError(f"--delta-key-bit out of range (0..{key_bits-1})")
+                delta_key = np.zeros(key_bits, dtype=np.uint8)
+                delta_key[mb] = 1
+                print(f"[override] Replacing combined delta_key with manual bit={mb}")
+            elif args.delta_key_hex:
+                delta_key = _parse_delta_key_from_hex(args.delta_key_hex, key_bits)
+                print("[override] Replacing combined delta_key with provided --delta-key-hex mask")
+        else:
+            # Plain-only difference
+            input_difference = user_diff_int
+            print(f"[difference] Using provided plain input difference: 0x{input_difference:X}")
+            # Determine delta_key from overrides or default to zeros
+            if args.delta_key_bit is not None:
+                mb = int(args.delta_key_bit)
+                if mb < 0 or mb >= key_bits:
+                    raise ValueError(f"--delta-key-bit out of range (0..{key_bits-1})")
+                delta_key = np.zeros(key_bits, dtype=np.uint8)
+                delta_key[mb] = 1
+            elif args.delta_key_hex:
+                delta_key = _parse_delta_key_from_hex(args.delta_key_hex, key_bits)
+            else:
+                delta_key = np.zeros(key_bits, dtype=np.uint8)
+                print("[info] No delta-key override provided; using delta_key = 0 (no related-key).")
     else:
-        # Default: no related-key difference
-        delta_key = np.zeros(key_bits, dtype=np.uint8)
-        print("[info] No --delta-key-bit/--delta-key-hex provided; using delta_key = 0 (no related-key).")
+        # Backward-compatible path using --input-diff and delta-key overrides
+        input_difference = int(args.input_diff, 16)
+        if args.delta_key_bit is not None:
+            if args.delta_key_bit < 0 or args.delta_key_bit >= key_bits:
+                raise ValueError(f"--delta-key-bit out of range (0..{key_bits-1})")
+            delta_key = np.zeros(key_bits, dtype=np.uint8)
+            delta_key[int(args.delta_key_bit)] = 1
+        elif args.delta_key_hex:
+            delta_key = _parse_delta_key_from_hex(args.delta_key_hex, key_bits)
+        else:
+            # Default: no related-key difference
+            delta_key = np.zeros(key_bits, dtype=np.uint8)
+            print("[info] No --delta-key-bit/--delta-key-hex provided; using delta_key = 0 (no related-key).")
 
     # Load model
     mp = Path(args.model_path)
@@ -274,3 +352,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# python eval_nets.py --cipher-module cipher.present80 --model-path D:\_Project_RKNDIncECA\Related-key-mcp-attention-Inception-based-ND\checkpoints\present80\with_diff-bit\present80_best_7r.weights.h5 --rounds 7 --pairs 8 --difference 0x800000000000000080000000000000000001 --combined-diff --delta-key-bit 0 --n-repeat 5

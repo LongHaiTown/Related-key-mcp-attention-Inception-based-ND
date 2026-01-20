@@ -26,7 +26,7 @@ from analysis.pca_helper import compute_pca
 from analysis.clustering_helper import kmeans_cluster, compute_silhouette, elbow_inertia
 from analysis.visualization_helper import plot_evr, scatter_2d, plot_elbow_curve, compare_3d_true_vs_pred
 # Sweep for auto-difference detection
-from sweep_input_diffs import sweep_input_differences
+# from sweep_input_diffs import sweep_input_differences
 
 
 def parse_args():

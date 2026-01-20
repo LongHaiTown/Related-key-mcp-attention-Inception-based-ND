@@ -150,7 +150,6 @@ def evaluate_with_statistics(
     }
 
 
-
 def _parse_delta_key_from_hex(hex_str: str, key_bits: int) -> np.ndarray:
     mask = int(hex_str, 16)
     arr = np.zeros(key_bits, dtype=np.uint8)
@@ -223,6 +222,7 @@ def main():
     parser.add_argument("--n-repeat", type=int, default=10, help="Number of repeated test evaluations")
     parser.add_argument("--test-samples", type=int, default=100_000, help="Samples per test set")
     parser.add_argument("--batch-size", type=int, default=5_000, help="Batch size for test generator")
+    parser.add_argument("--no-eca", action="store_true", help="When rebuilding model from weights, use the no-ECA variant (Ablation). Auto-detected from filename if present.")
     # Always use GPU path in generator (if available); no CPU fallback flag
     parser.add_argument("--log-path", type=str, default=None, help="Optional path to save evaluation log")
 
@@ -314,13 +314,19 @@ def main():
         try:
             model = tf.keras.models.load_model(str(mp))
         except Exception:
-            # Case 2: weights-only H5 — rebuild model from RKmcp.make_model_inception
+            # Case 2: weights-only H5 — rebuild model from RKmcp factories
             try:
-                from RKmcp import make_model_inception
+                from RKmcp import make_model_inception, make_model_inception_no_eca
             except Exception as e:
-                raise RuntimeError("Failed to import make_model_inception from RKmcp: " + str(e))
-            model = make_model_inception(pairs=int(args.pairs), plain_bits=plain_bits)
+                raise RuntimeError("Failed to import model factories from RKmcp: " + str(e))
+
+            # Decide whether to use the no-ECA variant (explicit flag or filename hint)
+            use_no_eca = bool(args.no_eca) or ('noeca' in mp.stem.lower()) or ('no_eca' in mp.stem.lower())
+            factory = make_model_inception_no_eca if use_no_eca else make_model_inception
+            model = factory(pairs=int(args.pairs), plain_bits=plain_bits)
             model.load_weights(str(mp))
+            if use_no_eca:
+                print("[info] Rebuilt model using no-ECA variant (make_model_inception_no_eca)")
     else:
         raise ValueError(f"Unsupported model file type: {suffix}. Use .keras or .h5/.hdf5")
     

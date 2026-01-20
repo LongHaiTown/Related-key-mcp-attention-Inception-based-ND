@@ -5,6 +5,7 @@ import datetime as dt
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
+from RKmcp import make_model_inception_no_eca
 
 TRAIN_NUM_SAMPLES = 10_000_000
 VAL_NUM_SAMPLES = 250_000
@@ -49,6 +50,7 @@ def parse_args():
     ap.add_argument("--batch-size", type=int, default=5000, help="Train batch size for generator")
     ap.add_argument("--val-batch-size", type=int, default=20000, help="Validation batch size")
     ap.add_argument("--use-gpu", action="store_true", default=True, help="Use GPU data generation (CuPy) if available")
+    ap.add_argument("--no-eca", action="store_true", help="Use no-ECA ablation variant (applies when building or loading weights)")
     ap.add_argument("--out-dir", type=str, default="staged_runs", help="Output directory for final artifacts")
     ap.add_argument("--save-final", action="store_true", help="Save final full model (.keras) additionally to weights")
     ap.add_argument("--init-model", type=str, default=None, help="Path to full .keras model to start from (takes priority over --init-weights)")
@@ -92,7 +94,7 @@ def _split_combined_difference(diff_int: int, plain_bits: int, key_bits: int):
     return plain_int, d_plain, d_key
 
 
-def build_or_load_initial_model(pairs, plain_bits, init_model_path=None, init_weights_path=None, lr=1e-3):
+def build_or_load_initial_model(pairs, plain_bits, init_model_path=None, init_weights_path=None, lr=1e-3, use_no_eca=False):
     """
     Build or load the initial model for staged training.
     Priority: init_model_path > init_weights_path > new model
@@ -110,15 +112,16 @@ def build_or_load_initial_model(pairs, plain_bits, init_model_path=None, init_we
             model.optimizer.learning_rate.assign(lr)
         return model
     
-    # Build fresh model
-    print(f"[INFO] Building new model with pairs={pairs}, plain_bits={plain_bits}")
-    model = make_model_inception(pairs=pairs, plain_bits=plain_bits)
+    # Build fresh model (select factory depending on ablation)
+    factory = make_model_inception_no_eca if use_no_eca else make_model_inception
+    print(f"[INFO] Building new model with pairs={pairs}, plain_bits={plain_bits} (no-ECA={use_no_eca})")
+    model = factory(pairs=pairs, plain_bits=plain_bits)
     model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=lr, amsgrad=True), 
                  loss="mse", metrics=["acc"])
     
     # Load weights if provided
     if init_weights_path:
-        print(f"[INFO] Loading weights from: {init_weights_path}")
+        print(f"[INFO] Loading weights from: {init_weights_path} (no-ECA={use_no_eca})")
         model.load_weights(init_weights_path)
     
     return model
@@ -245,7 +248,8 @@ def run_stage_training(args):
         plain_bits=plain_bits,
         init_model_path=args.init_model,
         init_weights_path=args.init_weights,
-        lr=lrs_list[0]
+        lr=lrs_list[0],
+        use_no_eca=bool(args.no_eca),
     )
 
     all_stage_histories = []
@@ -297,22 +301,24 @@ def run_stage_training(args):
         all_stage_histories.append(hist.history)
 
         # Save intermediate weights
-        weights_path = os.path.join(args.out_dir, f"{args.cipher}_stage{idx+1}_{stage_nr}r_last.weights.h5")
+        suffix = "_noECA" if args.no_eca else ""
+        weights_path = os.path.join(args.out_dir, f"{args.cipher}_stage{idx+1}_{stage_nr}r_last{suffix}.weights.h5")
         model.save_weights(weights_path)
         print(f"Saved stage {idx+1} weights: {weights_path}")
 
     # Final artifacts
-    final_weights = os.path.join(args.out_dir, f"{args.cipher}_staged_final.weights.h5")
+    suffix = "_noECA" if args.no_eca else ""
+    final_weights = os.path.join(args.out_dir, f"{args.cipher}_staged_final{suffix}.weights.h5")
     model.save_weights(final_weights)
     print(f"Saved final staged weights: {final_weights}")
 
     if args.save_final:
-        final_model_path = os.path.join(args.out_dir, f"{args.cipher}_staged_final.keras")
+        final_model_path = os.path.join(args.out_dir, f"{args.cipher}_staged_final{suffix}.keras")
         model.save(final_model_path)
         print(f"Saved final staged full model: {final_model_path}")
 
     # Save combined history
-    history_path = os.path.join(args.out_dir, f"{args.cipher}_staged_history.json")
+    history_path = os.path.join(args.out_dir, f"{args.cipher}_staged_history{suffix}.json")
     with open(history_path, "w", encoding="utf-8") as f:
         json.dump(all_stage_histories, f, ensure_ascii=False, indent=2)
     print(f"Saved staged training history: {history_path}")

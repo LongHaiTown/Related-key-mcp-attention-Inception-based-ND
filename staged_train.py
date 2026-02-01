@@ -23,7 +23,9 @@ from train_nets import (
     integer_to_binary_array,
     NDCMultiPairGenerator,
     make_model_inception,
+    train_by_chunks,
 )
+
 
 
 def parse_args():
@@ -55,6 +57,8 @@ def parse_args():
     ap.add_argument("--save-final", action="store_true", help="Save final full model (.keras) additionally to weights")
     ap.add_argument("--init-model", type=str, default=None, help="Path to full .keras model to start from (takes priority over --init-weights)")
     ap.add_argument("--init-weights", type=str, default=None, help="Path to weights file (.h5/.weights.h5) to initialize model")
+    ap.add_argument("--use-chunks", action="store_true", help="Use chunked training (train_by_chunks) per stage")
+    ap.add_argument("--chunk-size", type=int, default=10_000, help="Chunk size for chunked training")
     return ap.parse_args()
 
 
@@ -126,6 +130,102 @@ def build_or_load_initial_model(pairs, plain_bits, init_model_path=None, init_we
     
     return model
 
+
+# def train_by_chunks(
+#     model,
+#     encrypt,
+#     plain_bits,
+#     key_bits,
+#     n_round,
+#     pairs,
+#     delta_plain,
+#     delta_key,
+#     total_samples,
+#     chunk_size,
+#     batch_size,
+#     epochs,
+#     val_samples=1_000_000,
+#     patience=3,
+#     callbacks=None,
+# ):
+
+#     n_chunks = (total_samples + chunk_size - 1) // chunk_size
+
+#     from types import SimpleNamespace
+#     history_acc = {}
+
+#     # fixed validation generator
+#     val_gen = NDCMultiPairGenerator(
+#         encrypt,
+#         plain_bits,
+#         key_bits,
+#         n_round,
+#         delta_state=delta_plain,
+#         delta_key=delta_key,
+#         n_samples=val_samples,
+#         batch_size=batch_size,
+#         pairs=pairs,
+#     )
+
+#     best_val_loss = float("inf")
+#     wait = 0
+
+#     for epoch in range(epochs):
+#         print(f"\n========== Global Epoch {epoch+1}/{epochs} ==========")
+
+#         # ---- training ----
+#         for c in range(n_chunks):
+#             print(f"--- Chunk {c+1}/{n_chunks} ---")
+
+#             gen_chunk = NDCMultiPairGenerator(
+#                 encrypt,
+#                 plain_bits,
+#                 key_bits,
+#                 n_round,
+#                 delta_state=delta_plain,
+#                 delta_key=delta_key,
+#                 n_samples=chunk_size,
+#                 batch_size=batch_size,
+#                 pairs=pairs,
+#                 start_idx=c * chunk_size,
+#             )
+
+#             h = model.fit(
+#                 gen_chunk,
+#                 epochs=1,
+#                 callbacks=callbacks,
+#                 verbose=1,
+#             )
+
+#             if hasattr(h, "history"):
+#                 for k, v in h.history.items():
+#                     history_acc.setdefault(k, []).extend(v)
+
+#         # ---- validation ----
+#         val_loss, val_acc = model.evaluate(val_gen, verbose=0)
+#         print(f"[Validation] loss={val_loss:.5f}, acc={val_acc:.5f}")
+
+#         history_acc.setdefault("val_loss", []).append(val_loss)
+#         history_acc.setdefault("val_acc", []).append(val_acc)
+
+#         # ---- early stopping ----
+#         if val_loss < best_val_loss:
+#             best_val_loss = val_loss
+#             wait = 0
+#             print("✓ Validation improved")
+#         else:
+#             wait += 1
+#             print(f"✗ No improvement (patience {wait}/{patience})")
+
+#         if wait >= patience:
+#             print("Early stopping triggered (global epoch level)")
+#             break
+
+#     return SimpleNamespace(
+#         history=history_acc,
+#         epochs_completed=epoch + 1,
+#         n_chunks=n_chunks,
+#     )
 
 def run_stage_training(args):
     # Import cipher dynamically
@@ -290,15 +390,39 @@ def run_stage_training(args):
             [], rounds=stage_nr, cipher_name=args.cipher, run_id=f"{run_id}_stage{idx+1}", save_dir="checkpoints"
         )
 
-        hist = model.fit(
-            gen_train,
-            validation_data=gen_val,
-            epochs=stage_epochs,
-            callbacks=stage_callbacks,
-            verbose=True,
-        )
+        if args.use_chunks:
+            res = train_by_chunks(
+                model=model,
+                encrypt=encrypt,
+                plain_bits=plain_bits,
+                key_bits=key_bits,
+                n_round=stage_nr,
+                pairs=args.pairs,
+                delta_plain=delta_plain,
+                delta_key=delta_key,
+                total_samples=stage_train_samples,
+                chunk_size=args.chunk_size,
+                batch_size=args.batch_size,
+                epochs=stage_epochs,
+                val_samples=stage_val_samples,
+                callbacks=stage_callbacks,
+            )
+            # train_nets.train_by_chunks returns a history dict
+            if isinstance(res, dict):
+                hist_dict = res
+            else:
+                hist_dict = getattr(res, 'history', {}) or {}
+            all_stage_histories.append(hist_dict)
+        else:
+            hist = model.fit(
+                gen_train,
+                validation_data=gen_val,
+                epochs=stage_epochs,
+                callbacks=stage_callbacks,
+                verbose=True,
+            )
 
-        all_stage_histories.append(hist.history)
+            all_stage_histories.append(hist.history)
 
         # Save intermediate weights
         suffix = "_noECA" if args.no_eca else ""

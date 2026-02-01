@@ -6,7 +6,7 @@ import argparse
 import importlib
 import numpy as np
 from train_nets import (
-    update_checkpoint_in_callbacks, select_best_delta_key,
+    update_checkpoint_in_callbacks, select_best_delta_key,train_by_chunks,
     integer_to_binary_array, NDCMultiPairGenerator, make_model_inception, callbacks
 )
 import argparse
@@ -291,116 +291,116 @@ def make_generators(encrypt, plain_bits: int, key_bits: int, n_round: int, pairs
     return gen, gen_val
 
 
-def build_and_train_model(gen, gen_val, pairs: int, plain_bits: int, cb, epochs: int, batch_size: int):
-    X_train, Y_train = gen[0]
-    print("Sample training data shapes:", X_train.shape, Y_train.shape)
-    model = make_model_inception(pairs=pairs, plain_bits=plain_bits)
-    optimizer = tf.keras.optimizers.Adam(amsgrad=True)
-    model.compile(optimizer=optimizer, loss='mse', metrics=['acc'])
-    history = model.fit(
-        gen,
-        epochs=epochs,
-        validation_data=gen_val,
-        batch_size=batch_size,
-        callbacks=cb,
-        verbose=True,
-    )
-    return model, history
-def train_by_chunks(
-    model,
-    encrypt,
-    plain_bits,
-    key_bits,
-    n_round,
-    pairs,
-    delta_plain,
-    delta_key,
-    total_samples,
-    chunk_size,
-    batch_size,
-    epochs,
-    val_samples=1_000_000,
-    patience=3,
-    callbacks=None,
-):
+# def build_and_train_model(gen, gen_val, pairs: int, plain_bits: int, cb, epochs: int, batch_size: int):
+#     X_train, Y_train = gen[0]
+#     print("Sample training data shapes:", X_train.shape, Y_train.shape)
+#     model = make_model_inception(pairs=pairs, plain_bits=plain_bits)
+#     optimizer = tf.keras.optimizers.Adam(amsgrad=True)
+#     model.compile(optimizer=optimizer, loss='mse', metrics=['acc'])
+#     history = model.fit(
+#         gen,
+#         epochs=epochs,
+#         validation_data=gen_val,
+#         batch_size=batch_size,
+#         callbacks=cb,
+#         verbose=True,
+#     )
+#     return model, history
+# def train_by_chunks(
+#     model,
+#     encrypt,
+#     plain_bits,
+#     key_bits,
+#     n_round,
+#     pairs,
+#     delta_plain,
+#     delta_key,
+#     total_samples,
+#     chunk_size,
+#     batch_size,
+#     epochs,
+#     val_samples=1_000_000,
+#     patience=3,
+#     callbacks=None,
+# ):
 
-    n_chunks = (total_samples + chunk_size - 1) // chunk_size
+#     n_chunks = (total_samples + chunk_size - 1) // chunk_size
 
-    from types import SimpleNamespace
-    history_acc = {}
+#     from types import SimpleNamespace
+#     history_acc = {}
 
-    # fixed validation generator
-    val_gen = NDCMultiPairGenerator(
-        encrypt,
-        plain_bits,
-        key_bits,
-        n_round,
-        delta_state=delta_plain,
-        delta_key=delta_key,
-        n_samples=val_samples,
-        batch_size=batch_size,
-        pairs=pairs,
-    )
+#     # fixed validation generator
+#     val_gen = NDCMultiPairGenerator(
+#         encrypt,
+#         plain_bits,
+#         key_bits,
+#         n_round,
+#         delta_state=delta_plain,
+#         delta_key=delta_key,
+#         n_samples=val_samples,
+#         batch_size=batch_size,
+#         pairs=pairs,
+#     )
 
-    best_val_loss = float("inf")
-    wait = 0
+#     best_val_loss = float("inf")
+#     wait = 0
 
-    for epoch in range(epochs):
-        print(f"\n========== Global Epoch {epoch+1}/{epochs} ==========")
+#     for epoch in range(epochs):
+#         print(f"\n========== Global Epoch {epoch+1}/{epochs} ==========")
 
-        # ---- training ----
-        for c in range(n_chunks):
-            print(f"--- Chunk {c+1}/{n_chunks} ---")
+#         # ---- training ----
+#         for c in range(n_chunks):
+#             print(f"--- Chunk {c+1}/{n_chunks} ---")
 
-            gen_chunk = NDCMultiPairGenerator(
-                encrypt,
-                plain_bits,
-                key_bits,
-                n_round,
-                delta_state=delta_plain,
-                delta_key=delta_key,
-                n_samples=chunk_size,
-                batch_size=batch_size,
-                pairs=pairs,
-                start_idx=c * chunk_size,
-            )
+#             gen_chunk = NDCMultiPairGenerator(
+#                 encrypt,
+#                 plain_bits,
+#                 key_bits,
+#                 n_round,
+#                 delta_state=delta_plain,
+#                 delta_key=delta_key,
+#                 n_samples=chunk_size,
+#                 batch_size=batch_size,
+#                 pairs=pairs,
+#                 start_idx=c * chunk_size,
+#             )
 
-            h = model.fit(
-                gen_chunk,
-                epochs=1,
-                callbacks=callbacks,
-                verbose=1,
-            )
+#             h = model.fit(
+#                 gen_chunk,
+#                 epochs=1,
+#                 callbacks=callbacks,
+#                 verbose=1,
+#             )
 
-            if hasattr(h, "history"):
-                for k, v in h.history.items():
-                    history_acc.setdefault(k, []).extend(v)
+#             if hasattr(h, "history"):
+#                 for k, v in h.history.items():
+#                     history_acc.setdefault(k, []).extend(v)
 
-        # ---- validation ----
-        val_loss, val_acc = model.evaluate(val_gen, verbose=0)
-        print(f"[Validation] loss={val_loss:.5f}, acc={val_acc:.5f}")
+#         # ---- validation ----
+#         val_loss, val_acc = model.evaluate(val_gen, verbose=0)
+#         print(f"[Validation] loss={val_loss:.5f}, acc={val_acc:.5f}")
 
-        history_acc.setdefault("val_loss", []).append(val_loss)
-        history_acc.setdefault("val_acc", []).append(val_acc)
+#         history_acc.setdefault("val_loss", []).append(val_loss)
+#         history_acc.setdefault("val_acc", []).append(val_acc)
 
-        # ---- early stopping ----
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            wait = 0
-            print("✓ Validation improved")
-        else:
-            wait += 1
-            print(f"✗ No improvement (patience {wait}/{patience})")
+#         # ---- early stopping ----
+#         if val_loss < best_val_loss:
+#             best_val_loss = val_loss
+#             wait = 0
+#             print("✓ Validation improved")
+#         else:
+#             wait += 1
+#             print(f"✗ No improvement (patience {wait}/{patience})")
 
-        if wait >= patience:
-            print("Early stopping triggered (global epoch level)")
-            break
+#         if wait >= patience:
+#             print("Early stopping triggered (global epoch level)")
+#             break
 
-    return SimpleNamespace(
-        history=history_acc,
-        epochs_completed=epoch + 1,
-        n_chunks=n_chunks,
-    )
+#     return SimpleNamespace(
+#         history=history_acc,
+#         epochs_completed=epoch + 1,
+#         n_chunks=n_chunks,
+#     )
 
 
 def save_artifacts(model, history, cipher_name: str, n_round: int, run_id: str):
@@ -573,13 +573,12 @@ def run():
         pairs,
         delta_plain,
         delta_key,
-        TOTAL_SAMPLES,
-        CHUNK_SIZE,
-        BATCH_SIZE,
+        total_samples=NUM_SAMPLES_TRAIN,
+        chunk_size=CHUNK_SIZE,
+        batch_size=BATCH_SIZE,
         epochs=EPOCHS,
-        callbacks=cb,
+        callbacks=callbacks,
     )
-
 
     # Save artifacts
     save_artifacts(model, history, cipher_name, n_round, run_id)

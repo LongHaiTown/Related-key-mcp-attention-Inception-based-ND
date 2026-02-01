@@ -203,3 +203,109 @@ def select_best_delta_key(
 
     print(f"\n✅ Best delta_key bit: {best_bit} with score = {best_score:.5f}")
     return best_bit, best_score, all_scores
+
+
+def train_by_chunks(
+    model,
+    encrypt,
+    plain_bits,
+    key_bits,
+    n_round,
+    pairs,
+    delta_plain,
+    delta_key,
+    total_samples,
+    chunk_size,
+    batch_size,
+    epochs,
+    val_samples=1_000_000,
+    callbacks=None,
+):
+    """
+    Chunk-based training with GLOBAL-EPOCH callbacks compatibility.
+    """
+
+    n_chunks = (total_samples + chunk_size - 1) // chunk_size
+    callbacks = callbacks or []
+
+    # --- build fixed validation generator ---
+    val_gen = NDCMultiPairGenerator(
+        encrypt,
+        plain_bits,
+        key_bits,
+        n_round,
+        delta_state=delta_plain,
+        delta_key=delta_key,
+        n_samples=val_samples,
+        batch_size=batch_size,
+        pairs=pairs,
+    )
+
+    # --- callback lifecycle: on_train_begin ---
+    for cb in callbacks:
+        cb.set_model(model)
+        cb.on_train_begin()
+
+    history = {"loss": [], "val_loss": [], "val_acc": []}
+
+    for epoch in range(epochs):
+        print(f"\n========== Global Epoch {epoch+1}/{epochs} ==========")
+
+        # ---- LR scheduler (epoch-level) ----
+        for cb in callbacks:
+            if isinstance(cb, LearningRateScheduler):
+                lr = cb.schedule(epoch)
+                tf.keras.backend.set_value(model.optimizer.learning_rate, lr)
+                print(f"[LR] set to {lr:.6e}")
+
+        # ---- training chunks ----
+        for c in range(n_chunks):
+            print(f"--- Chunk {c+1}/{n_chunks} ---")
+
+            gen_chunk = NDCMultiPairGenerator(
+                encrypt,
+                plain_bits,
+                key_bits,
+                n_round,
+                delta_state=delta_plain,
+                delta_key=delta_key,
+                n_samples=chunk_size,
+                batch_size=batch_size,
+                pairs=pairs,
+            )
+
+            h = model.fit(gen_chunk, epochs=1, verbose=1)
+
+            # accumulate training loss
+            if "loss" in h.history:
+                history["loss"].extend(h.history["loss"])
+
+        # ---- validation ----
+        val_loss, val_acc = model.evaluate(val_gen, verbose=0)
+        print(f"[Validation] loss={val_loss:.5f}, acc={val_acc:.5f}")
+
+        history["val_loss"].append(val_loss)
+        history["val_acc"].append(val_acc)
+
+        logs = {
+            "loss": history["loss"][-1],
+            "val_loss": val_loss,
+            "val_acc": val_acc,
+        }
+
+        # ---- callbacks: on_epoch_end ----
+        stop_training = False
+        for cb in callbacks:
+            cb.on_epoch_end(epoch, logs)
+            if getattr(model, "stop_training", False):
+                stop_training = True
+
+        if stop_training:
+            print("⛔ Early stopping triggered by callback")
+            break
+
+    # --- callbacks: on_train_end ---
+    for cb in callbacks:
+        cb.on_train_end()
+
+    return history
